@@ -1,0 +1,42 @@
+name: EuroLeague IQ
+
+on:
+  schedule:
+    # EuroLeague round nights run Tue-Fri (occasionally weekends for
+    # rescheduled games), and the predictor scans an 8-day-ahead window
+    # regardless of today's date, so 3x/week keeps it current without
+    # hammering an undocumented, keyless, no-published-rate-limit API
+    # more than necessary -- same reasoning as Match IQ's own schedule.
+    - cron: '0 7 * * 1,3,5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run EuroLeague IQ
+        # No API key needed -- uses EuroLeague's own public v2 API.
+        run: python3 euroleague_iq.py
+
+      - name: Commit and push updated predictions
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/euroleague-iq/
+          git diff --staged --quiet || git commit -m "Update EuroLeague IQ predictions"
+          git pull --rebase --autostash origin main
+          git push
