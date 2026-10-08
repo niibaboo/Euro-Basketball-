@@ -472,7 +472,12 @@ def build_predictions():
             **proj,
         })
 
-    predictions.sort(key=lambda x: x['exp_total'], reverse=True)
+    # Chronological, not by exp_total -- EuroLeague round nights span several
+    # calendar days within the UPCOMING_WINDOW_DAYS scan window, and sorting
+    # by projected total mixed games from different days together with no
+    # way to tell which was "tonight" vs "in a week" (user feedback: "it's
+    # all over the place"). Date headers in make_html() group same-day games.
+    predictions.sort(key=lambda x: x.get('date') or '')
     return predictions
 
 
@@ -731,19 +736,36 @@ def player_props_section(team_label, props):
 
 
 def make_html(predictions):
-    cards = "".join(CARD_TEMPLATE.format(
-        date=p['date'][:16].replace('T', ' '), match=p['match'],
-        away_team=p['away_team'], home_team=p['home_team'],
-        exp_away=p['exp_away'], exp_home=p['exp_home'], exp_total=p['exp_total'],
-        away_scored=p['away_form']['avg_scored'], away_allowed=p['away_form']['avg_allowed'],
-        away_n=p['away_form']['n_games'],
-        home_scored=p['home_form']['avg_scored'], home_allowed=p['home_form']['avg_allowed'],
-        home_n=p['home_form']['n_games'],
-        player_props_html=(
-            player_props_section(p['away_team'], p.get('away_props', []))
-            + player_props_section(p['home_team'], p.get('home_props', []))
-        ),
-    ) for p in predictions)
+    # Group into same-day sections with a date header, rather than one flat
+    # list. build_predictions() already sorts chronologically, but sort
+    # again here defensively so this function produces a correctly grouped
+    # page even if it's ever called with an unsorted list.
+    predictions = sorted(predictions, key=lambda x: x.get('date') or '')
+
+    cards = ""
+    last_date_key = None
+    for p in predictions:
+        date_key = (p.get('date') or '')[:10]
+        if date_key != last_date_key:
+            try:
+                label = datetime.fromisoformat(date_key).strftime('%a %d %b') if date_key else "Date TBC"
+            except ValueError:
+                label = date_key or "Date TBC"
+            cards += f'<div style="color:#7ec8ff;font-size:12px;font-weight:bold;margin:18px 0 8px;padding-bottom:4px;border-bottom:1px solid #2a3038">{label}</div>'
+            last_date_key = date_key
+        cards += CARD_TEMPLATE.format(
+            date=p['date'][:16].replace('T', ' '), match=p['match'],
+            away_team=p['away_team'], home_team=p['home_team'],
+            exp_away=p['exp_away'], exp_home=p['exp_home'], exp_total=p['exp_total'],
+            away_scored=p['away_form']['avg_scored'], away_allowed=p['away_form']['avg_allowed'],
+            away_n=p['away_form']['n_games'],
+            home_scored=p['home_form']['avg_scored'], home_allowed=p['home_form']['avg_allowed'],
+            home_n=p['home_form']['n_games'],
+            player_props_html=(
+                player_props_section(p['away_team'], p.get('away_props', []))
+                + player_props_section(p['home_team'], p.get('home_props', []))
+            ),
+        )
     if not cards:
         cards = '<p style="text-align:center;color:#666">No upcoming games with enough form data to project right now.</p>'
 
