@@ -54,11 +54,15 @@ sportsiq repo), so output goes straight to docs/ root rather than nested
 under a docs/<tool-name>/ subfolder -- GitHub Pages serving from
 main branch /docs then just works with no separate landing page needed.
 
-NOT included in this first version (can be added later, same as every
-other tool's incremental history): Hot Form / Real Streak panels. Kept out
-to keep this first cut's scope sane -- team totals + player props +
-Safest Bet Builder + results tracker is already "the works" from Blitz
-IQ's own feature set.
+Hot Form / Real Streak: team-level scoring-form screens, same concept as
+Euro Ice's Goal Streak panel but relative to a freshly-computed league
+average rather than a fixed absolute number -- EuroLeague's scoring
+environment isn't something this session can calibrate against live data,
+so HOT_FORM_MARGIN and the Real Streak threshold are both set off
+lg_scored (this run's own league-average points) instead of a guessed
+constant. Hot Form = last RECENT_GAMES avg scored beats league average by
+HOT_FORM_MARGIN+; Real Streak = a genuine CONSECUTIVE run of games each
+beating league average, length >= REAL_STREAK_MIN_LENGTH.
 """
 
 import os
@@ -88,6 +92,16 @@ PLAYER_MIN_GAMES = 2           # a player needs to have appeared in at least
                                # be considered a "featured" player worth a prop
 PLAYER_POOL_SIZE = 5           # cap per team, same rough scale as Blitz IQ's
                                # one-starter-per-position (QB/RB/WR/TE = 4)
+HOT_FORM_MARGIN = 6.0          # points above this run's own league-average
+                               # scored (lg_scored) needed to count as
+                               # "hot" over the last RECENT_GAMES games --
+                               # relative, not a fixed absolute number, same
+                               # reasoning as the module docstring above.
+REAL_STREAK_MIN_LENGTH = 3     # shortest CONSECUTIVE run (most recent game
+                               # backward, no break) of games each beating
+                               # league-average scored that counts as "a
+                               # streak" -- same bar Euro Ice's Real Streak
+                               # panel uses.
 
 
 def current_season_year():
@@ -193,6 +207,20 @@ def recency_weighted(values):
 
 def shrink(value, n, league_avg, prior=PRIOR_STRENGTH):
     return (n * value + prior * league_avg) / (n + prior)
+
+
+def _current_scoring_streak(scored_list, threshold):
+    """scored_list is oldest->newest (recency_weighted()'s convention
+    everywhere in this file). Walks backward from the most recent game,
+    counting consecutive games that beat threshold, stopping at the first
+    break -- same approach as Euro Ice's _current_goal_streak."""
+    streak = 0
+    for v in reversed(scored_list):
+        if v > threshold:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 team_form_cache = {}
@@ -429,7 +457,7 @@ def build_predictions():
     schedule = get_schedule(code)
     if not schedule:
         print(f"  [!] empty schedule for season {code} -- nothing to predict")
-        return []
+        return [], [], [], None
 
     upcoming = get_upcoming_games(schedule)
     print(f"  {len(upcoming)} upcoming game(s) in the next {UPCOMING_WINDOW_DAYS} days")
@@ -453,6 +481,13 @@ def build_predictions():
         team_forms_by_game.append((g, local, road, h_code, a_code, h_form, a_form))
 
     lg_scored, lg_allowed = league_averages(all_forms)
+    # Fresh per-run threshold for Real Streak -- see HOT_FORM_MARGIN/
+    # REAL_STREAK_MIN_LENGTH comments: no safe fixed number to hardcode, so
+    # this is just this run's own league-average points, rounded.
+    real_streak_threshold = round(lg_scored, 1)
+
+    streak_entries = []
+    real_streak_entries = []
 
     for g, local, road, h_code, a_code, h_form, a_form in team_forms_by_game:
         proj = predict(h_form, a_form, lg_scored, lg_allowed)
@@ -472,13 +507,46 @@ def build_predictions():
             **proj,
         })
 
+        for team, team_name, opp_name, is_home, form in (
+            (local, local.get('name'), road.get('name'), True, h_form),
+            (road, road.get('name'), local.get('name'), False, a_form),
+        ):
+            scored_list = form['scored_list']
+            if form['avg_scored'] - lg_scored >= HOT_FORM_MARGIN:
+                streak_entries.append({
+                    'team': team_name, 'opponent': opp_name, 'is_home': is_home,
+                    'date': g.get('date', ''), 'last5_avg': form['avg_scored'],
+                    'last5_scored': scored_list, 'lg_scored': round(lg_scored, 1),
+                    # Verification threshold (results tracker): did this team's
+                    # ACTUAL points in the predicted match beat this run's
+                    # league-average scored -- same "did the form continue"
+                    # check Euro Ice's Hot Form/Real Streak panels use.
+                    'threshold': real_streak_threshold,
+                    'home_name': local.get('name'), 'away_name': road.get('name'),
+                    'season': code, 'game_code': g.get('gameCode'),
+                })
+
+            streak_len = _current_scoring_streak(scored_list, real_streak_threshold)
+            if streak_len >= REAL_STREAK_MIN_LENGTH:
+                real_streak_entries.append({
+                    'team': team_name, 'opponent': opp_name, 'is_home': is_home,
+                    'date': g.get('date', ''), 'streak_len': streak_len,
+                    'streak_games': scored_list[-streak_len:],  # already old->new
+                    'full_sample': streak_len >= len(scored_list),
+                    'threshold': real_streak_threshold,
+                    'home_name': local.get('name'), 'away_name': road.get('name'),
+                    'season': code, 'game_code': g.get('gameCode'),
+                })
+
     # Chronological, not by exp_total -- EuroLeague round nights span several
     # calendar days within the UPCOMING_WINDOW_DAYS scan window, and sorting
     # by projected total mixed games from different days together with no
     # way to tell which was "tonight" vs "in a week" (user feedback: "it's
     # all over the place"). Date headers in make_html() group same-day games.
     predictions.sort(key=lambda x: x.get('date') or '')
-    return predictions
+    streak_entries.sort(key=lambda e: -e['last5_avg'])
+    real_streak_entries.sort(key=lambda e: -e['streak_len'])
+    return predictions, streak_entries, real_streak_entries, round(lg_scored, 1)
 
 
 def build_legs(predictions):
@@ -691,6 +759,74 @@ function buildSafest() {{
 </script>"""
 
 
+STREAK_ENTRY_TEMPLATE = """<div style="background:#161d27;border-radius:8px;padding:10px 12px;margin:8px 0;display:flex;gap:10px;align-items:flex-start">
+  <div style="min-width:56px;text-align:center;background:#0f1318;border:1px solid #2a3038;border-radius:8px;padding:6px 4px;flex-shrink:0">
+    <div style="font-size:9px;color:#888">L5 AVG</div>
+    <div style="font-size:17px;font-weight:bold;color:#22c55e">{last5_avg}</div>
+  </div>
+  <div style="flex:1;min-width:0">
+    <div style="font-size:14px;font-weight:bold;margin:1px 0 4px">{team} <span style="color:#888;font-weight:normal;font-size:11px">({home_away})</span> vs {opponent}</div>
+    <div style="font-size:10px;color:#888">last {n} (old→new): {last5_str} · league avg {lg_scored}</div>
+  </div>
+</div>"""
+
+REAL_STREAK_ENTRY_TEMPLATE = """<div style="background:#161d27;border-radius:8px;padding:10px 12px;margin:8px 0;display:flex;gap:10px;align-items:flex-start">
+  <div style="min-width:56px;text-align:center;background:#0f1318;border:1px solid #f59e0b;border-radius:8px;padding:6px 4px;flex-shrink:0">
+    <div style="font-size:9px;color:#888">STREAK</div>
+    <div style="font-size:17px;font-weight:bold;color:#f59e0b">{streak_len}{plus}</div>
+  </div>
+  <div style="flex:1;min-width:0">
+    <div style="font-size:14px;font-weight:bold;margin:1px 0 4px">{team} <span style="color:#888;font-weight:normal;font-size:11px">({home_away})</span> vs {opponent}</div>
+    <div style="font-size:10px;color:#888">{streak_len} straight above league avg ({threshold}+) (old→new): {streak_str}</div>
+  </div>
+</div>"""
+
+STREAK_PANEL_TEMPLATE = """<div style="background:#1a1f26;border-radius:12px;padding:16px;margin:12px 0;border:1px solid #2a3038">
+  <div style="font-size:15px;font-weight:800;margin-bottom:10px">🔥 Hot Form &amp; Streaks</div>
+  <div style="font-size:11px;color:#888;margin-bottom:10px">
+    Raw recent-FORM screens, not probabilistic predictions like the Team/Game Totals above.
+    Both are measured against this run's own league-average scoring (currently {lg_scored} pts) --
+    Hot Form and Real Streak measure genuinely different things, a team can appear in one, both,
+    or neither.
+  </div>
+  <div style="font-size:12px;font-weight:700;margin:8px 0 2px">📊 Hot Form <span style="color:#888;font-weight:normal;font-size:10px">(last {n} avg ≥{margin}+ above league average)</span></div>
+  {hot_form_entries}
+  <div style="font-size:12px;font-weight:700;margin:14px 0 2px">🔥 Real Streak <span style="color:#888;font-weight:normal;font-size:10px">(≥{min_streak}+ CONSECUTIVE games above league average, no break)</span></div>
+  {streak_entries}
+</div>"""
+
+
+def render_streak_panel(hot_form_entries, real_streak_entries, lg_scored):
+    if not hot_form_entries and not real_streak_entries:
+        return ""
+    hot_form_html = "".join(
+        STREAK_ENTRY_TEMPLATE.format(
+            last5_avg=e["last5_avg"], team=e["team"],
+            home_away="Home" if e["is_home"] else "Away", opponent=e["opponent"],
+            n=len(e["last5_scored"]),
+            last5_str="/".join(str(v) for v in e["last5_scored"]),  # already oldest-first
+            lg_scored=e["lg_scored"],
+        )
+        for e in hot_form_entries
+    ) or '<p style="color:#888;font-size:11px">None currently.</p>'
+
+    streak_html = "".join(
+        REAL_STREAK_ENTRY_TEMPLATE.format(
+            streak_len=e["streak_len"], plus="+" if e["full_sample"] else "",
+            team=e["team"], home_away="Home" if e["is_home"] else "Away",
+            opponent=e["opponent"], threshold=lg_scored,
+            streak_str="/".join(str(v) for v in e["streak_games"]),
+        )
+        for e in real_streak_entries
+    ) or '<p style="color:#888;font-size:11px">None currently.</p>'
+
+    return STREAK_PANEL_TEMPLATE.format(
+        lg_scored=lg_scored, n=RECENT_GAMES, margin=HOT_FORM_MARGIN,
+        min_streak=REAL_STREAK_MIN_LENGTH,
+        hot_form_entries=hot_form_html, streak_entries=streak_html,
+    )
+
+
 HTML_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>EuroLeague IQ</title></head>
 <body style="background:#0b0f14;color:white;font-family:Arial;padding:12px;max-width:600px;margin:auto">
@@ -701,6 +837,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="utf-8">
   <a href="results/index.html" style="color:#ffeb3b;text-decoration:none;font-size:12px">📊 Results Tracker</a>
 </p>
 {builder}
+{streak_panel}
 {cards}
 <p style="text-align:center;color:#666;font-size:10px;margin-top:20px">Enter your book's Over/Under line and odds to compute an edge the same way as the other tools in this suite — this page shows the model's own projection only. Player props are built from whichever players actually featured in each team's last {recent_games} games (no fixed "starters" list), so a new or returning player may take a run or two to show up.</p>
 </body></html>"""
@@ -735,7 +872,7 @@ def player_props_section(team_label, props):
     return f'<div style="margin-top:8px"><div style="color:#888;font-size:10px;text-transform:uppercase;margin-bottom:2px">{team_label} Player Props</div>{rows}</div>'
 
 
-def make_html(predictions):
+def make_html(predictions, streak_entries=None, real_streak_entries=None, lg_scored=None):
     # Group into same-day sections with a date header, rather than one flat
     # list. build_predictions() already sorts chronologically, but sort
     # again here defensively so this function produces a correctly grouped
@@ -772,9 +909,14 @@ def make_html(predictions):
     legs = build_legs(predictions)
     builder = BUILDER_TEMPLATE.format(legs_json=json.dumps(legs)) if legs else ""
 
+    streak_panel = render_streak_panel(
+        streak_entries or [], real_streak_entries or [],
+        lg_scored if lg_scored is not None else "—",
+    )
+
     return HTML_TEMPLATE.format(
         generated=datetime.now().strftime("%d %b %H:%M"),
-        builder=builder, cards=cards, recent_games=RECENT_GAMES,
+        builder=builder, streak_panel=streak_panel, cards=cards, recent_games=RECENT_GAMES,
     )
 
 
@@ -820,10 +962,10 @@ def write_player_props_csv(predictions, path):
 
 
 if __name__ == "__main__":
-    predictions = build_predictions()
+    predictions, streak_entries, real_streak_entries, lg_scored = build_predictions()
     os.makedirs('docs', exist_ok=True)
     with open('docs/index.html', 'w') as f:
-        f.write(make_html(predictions))
+        f.write(make_html(predictions, streak_entries, real_streak_entries, lg_scored))
     write_csv(predictions, 'docs/euroleague_iq_predictions.csv')
     write_player_props_csv(predictions, 'docs/euroleague_iq_player_props.csv')
     with open('docs/euroleague_iq.json', 'w') as f:
@@ -831,6 +973,8 @@ if __name__ == "__main__":
 
     try:
         import euroleague_iq_results_tracker
-        euroleague_iq_results_tracker.run_results_tracker(build_legs(predictions))
+        euroleague_iq_results_tracker.run_results_tracker(
+            build_legs(predictions), streak_entries, real_streak_entries, lg_scored,
+        )
     except Exception as e:
         print(f"[!] Results tracker failed, but the rest of this run succeeded: {e}")
