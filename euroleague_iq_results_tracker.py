@@ -17,9 +17,9 @@ ID -- every leg carries both, same way Blitz IQ's legs carry game_id.
 Designed to be imported and called from euroleague_iq.py's main().
 
 Output:
-    docs/euroleague-iq/results/log.json    -- the full log
-    docs/euroleague-iq/results/index.html  -- dashboard: overall + per-category
-                                               win rate, recent history
+    docs/results/log.json    -- the full log
+    docs/results/index.html  -- dashboard: overall + per-category
+                                 win rate, recent history
 """
 
 import os
@@ -29,8 +29,8 @@ import requests
 from datetime import datetime, timezone
 
 BASE = "https://api-live.euroleague.net/v2/competitions/E"
-LOG_PATH = "docs/euroleague-iq/results/log.json"
-DASHBOARD_PATH = "docs/euroleague-iq/results/index.html"
+LOG_PATH = "docs/results/log.json"
+DASHBOARD_PATH = "docs/results/index.html"
 
 STATS_CACHE = {}  # (season, game_code) -> box score, several legs share a game
 
@@ -97,30 +97,62 @@ def save_log(entries):
         json.dump(entries, f, indent=2, default=str)
 
 
-def log_todays_signals(legs, log):
+def log_todays_signals(legs, streak_entries, real_streak_entries, log):
     """Legs already carry season, game_code, is_home, line, and (for
     player props) player_code/stat_key -- added specifically for this
-    tracker when the legs were built."""
+    tracker when the legs were built. Hot Form / Real Streak entries carry
+    season, game_code, is_home, and the league-average threshold captured
+    at flag time ('threshold') -- verified by checking whether the team's
+    ACTUAL points in that same predicted match beat it, same "did the form
+    continue" check Euro Ice's own Hot Form/Real Streak panels use."""
     existing_ids = {e["id"] for e in log}
     added = 0
-    for leg in legs:
-        scanner = CATEGORY_SCANNER.get(leg.get("category"))
-        if not scanner or leg.get("game_code") is None or not leg.get("season"):
-            continue
-        eid = _entry_id(scanner, leg["market"], leg["game_date"], leg["match"])
+
+    def add(scanner, match, market, value, detail, season, game_code, date_key,
+             is_home=None, line=None, player_code=None, stat_key=None, threshold=None):
+        nonlocal added
+        eid = _entry_id(scanner, market, date_key, match)
         if eid in existing_ids:
-            continue
+            return
         log.append({
-            "id": eid, "scanner": scanner, "match": leg["match"], "market": leg["market"],
-            "value": leg["prob"], "detail": leg.get("detail"), "line": leg.get("line"),
-            "season": leg["season"], "game_code": leg["game_code"], "game_date": leg["game_date"],
-            "date_key": leg["game_date"], "is_home": leg.get("is_home"),
-            "player_code": leg.get("player_code"), "stat_key": leg.get("stat_key"),
+            "id": eid, "scanner": scanner, "match": match, "market": market,
+            "value": value, "detail": detail, "line": line, "threshold": threshold,
+            "season": season, "game_code": game_code, "game_date": date_key,
+            "date_key": date_key, "is_home": is_home,
+            "player_code": player_code, "stat_key": stat_key,
             "logged_at": datetime.now(timezone.utc).isoformat(),
             "status": "pending", "result": None, "actual": None,
         })
         existing_ids.add(eid)
         added += 1
+
+    for leg in legs:
+        scanner = CATEGORY_SCANNER.get(leg.get("category"))
+        if not scanner or leg.get("game_code") is None or not leg.get("season"):
+            continue
+        add(scanner, leg["match"], leg["market"], leg["prob"], leg.get("detail"),
+            leg["season"], leg["game_code"], leg["game_date"],
+            is_home=leg.get("is_home"), line=leg.get("line"),
+            player_code=leg.get("player_code"), stat_key=leg.get("stat_key"))
+
+    for e in streak_entries:
+        if e.get("game_code") is None or not e.get("season"):
+            continue
+        match = f"{e['team']} vs {e['opponent']}"
+        add("hot_form", match, f"Hot Form vs {e['opponent']}", e["last5_avg"],
+            f"L5 avg {e['last5_avg']} (league avg {e['lg_scored']})",
+            e["season"], e["game_code"], (e.get("date") or "")[:10],
+            is_home=e["is_home"], threshold=e["threshold"])
+
+    for e in real_streak_entries:
+        if e.get("game_code") is None or not e.get("season"):
+            continue
+        match = f"{e['team']} vs {e['opponent']}"
+        add("real_streak", match, f"Real Streak vs {e['opponent']}", e["streak_len"],
+            f"{e['streak_len']} straight above league avg ({e['threshold']}+)",
+            e["season"], e["game_code"], (e.get("date") or "")[:10],
+            is_home=e["is_home"], threshold=e["threshold"])
+
     print(f"  Results log: {added} new pick(s) logged, {len(log)} total in log")
     return log
 
@@ -170,6 +202,22 @@ def _verify_player_leg(entry):
     return {"actual": actual, "result": "hit" if actual > entry["line"] else "miss"}
 
 
+def _verify_form_streak_entry(entry):
+    """Hot Form / Real Streak are raw-form screens, not probabilistic
+    predictions -- 'hit' means the flagged team's actual points in THIS
+    SAME predicted match beat the league-average threshold captured when
+    the entry was flagged, i.e. the form continued."""
+    stats = _get_game_stats(entry["season"], entry["game_code"])
+    if not _is_final(stats):
+        return None
+    local_pts = ((stats.get('local') or {}).get('total') or {}).get('points')
+    road_pts = ((stats.get('road') or {}).get('total') or {}).get('points')
+    if local_pts is None or road_pts is None:
+        return None
+    actual = float(local_pts) if entry.get("is_home") else float(road_pts)
+    return {"actual": actual, "result": "hit" if actual > entry["threshold"] else "miss"}
+
+
 def verify_pending_results(log, max_checks=200):
     today = datetime.now(timezone.utc).date().isoformat()
     checked = 0
@@ -190,6 +238,8 @@ def verify_pending_results(log, max_checks=200):
                 result = _verify_team_leg(entry)
             elif entry["scanner"] in ("points", "rebounds", "assists"):
                 result = _verify_player_leg(entry)
+            elif entry["scanner"] in ("hot_form", "real_streak"):
+                result = _verify_form_streak_entry(entry)
         except Exception as e:
             print(f"    [!] verification error for entry {entry['id']} ({entry['scanner']}): {e}")
             result = None
@@ -218,6 +268,7 @@ def build_results_dashboard(log):
     SCANNER_LABELS = {
         "team_total": "Team Total", "game_total": "Game Total",
         "points": "Points", "rebounds": "Rebounds", "assists": "Assists",
+        "hot_form": "Hot Form", "real_streak": "Real Streak",
     }
 
     total_hit = sum(d["hit"] for d in by_scanner.values())
@@ -283,11 +334,11 @@ def build_results_dashboard(log):
     print(f"  Results dashboard: {total} verified, {overall_pct}% overall" if total else "  Results dashboard: no verified picks yet")
 
 
-def run_results_tracker(legs):
+def run_results_tracker(legs, streak_entries=None, real_streak_entries=None, lg_scored=None):
     """Single entry point called from euroleague_iq.py's main()."""
     print("\nRunning results tracker...")
     log = load_log()
-    log = log_todays_signals(legs, log)
+    log = log_todays_signals(legs, streak_entries or [], real_streak_entries or [], log)
     log = verify_pending_results(log)
     save_log(log)
     build_results_dashboard(log)
