@@ -17,9 +17,9 @@ ID -- every leg carries both, same way Blitz IQ's legs carry game_id.
 Designed to be imported and called from euroleague_iq.py's main().
 
 Output:
-    docs/euroleague-iq/results/log.json    -- the full log
-    docs/euroleague-iq/results/index.html  -- dashboard: overall + per-category
-                                               win rate, recent history
+    docs/results/log.json    -- the full log
+    docs/results/index.html  -- dashboard: overall + per-category
+                                 win rate, recent history
 """
 
 import os
@@ -29,8 +29,8 @@ import requests
 from datetime import datetime, timezone
 
 BASE = "https://api-live.euroleague.net/v2/competitions/E"
-LOG_PATH = "docs/euroleague-iq/results/log.json"
-DASHBOARD_PATH = "docs/euroleague-iq/results/index.html"
+LOG_PATH = "docs/results/log.json"
+DASHBOARD_PATH = "docs/results/index.html"
 
 STATS_CACHE = {}  # (season, game_code) -> box score, several legs share a game
 
