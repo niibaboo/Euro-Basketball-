@@ -44,10 +44,15 @@ Rebounds (poisson), Assists (poisson) -- same distribution split Blitz IQ
 uses for yardage-like vs. count-like stats.
 
 Output:
-    docs/euroleague-iq/index.html                       -- predictions page
-    docs/euroleague-iq/euroleague_iq_predictions.csv     -- team totals
-    docs/euroleague-iq/euroleague_iq_player_props.csv    -- player props
-    docs/euroleague-iq/euroleague_iq.json                -- raw predictions
+    docs/index.html                       -- predictions page
+    docs/euroleague_iq_predictions.csv    -- team totals
+    docs/euroleague_iq_player_props.csv   -- player props
+    docs/euroleague_iq.json               -- raw predictions
+
+This repo is standalone (one tool, not a multi-tool suite like the main
+sportsiq repo), so output goes straight to docs/ root rather than nested
+under a docs/<tool-name>/ subfolder -- GitHub Pages serving from
+main branch /docs then just works with no separate landing page needed.
 
 NOT included in this first version (can be added later, same as every
 other tool's incremental history): Hot Form / Real Streak panels. Kept out
@@ -794,12 +799,12 @@ def write_player_props_csv(predictions, path):
 
 if __name__ == "__main__":
     predictions = build_predictions()
-    os.makedirs('docs/euroleague-iq', exist_ok=True)
-    with open('docs/euroleague-iq/index.html', 'w') as f:
+    os.makedirs('docs', exist_ok=True)
+    with open('docs/index.html', 'w') as f:
         f.write(make_html(predictions))
-    write_csv(predictions, 'docs/euroleague-iq/euroleague_iq_predictions.csv')
-    write_player_props_csv(predictions, 'docs/euroleague-iq/euroleague_iq_player_props.csv')
-    with open('docs/euroleague-iq/euroleague_iq.json', 'w') as f:
+    write_csv(predictions, 'docs/euroleague_iq_predictions.csv')
+    write_player_props_csv(predictions, 'docs/euroleague_iq_player_props.csv')
+    with open('docs/euroleague_iq.json', 'w') as f:
         json.dump(predictions, f, indent=2, default=str)
 
     try:
