@@ -44,15 +44,18 @@ Rebounds (poisson), Assists (poisson) -- same distribution split Blitz IQ
 uses for yardage-like vs. count-like stats.
 
 Output:
-    docs/index.html                       -- predictions page
+    docs/euroleague-iq/index.html         -- predictions page
     docs/euroleague_iq_predictions.csv    -- team totals
     docs/euroleague_iq_player_props.csv   -- player props
     docs/euroleague_iq.json               -- raw predictions
 
-This repo is standalone (one tool, not a multi-tool suite like the main
-sportsiq repo), so output goes straight to docs/ root rather than nested
-under a docs/<tool-name>/ subfolder -- GitHub Pages serving from
-main branch /docs then just works with no separate landing page needed.
+Lives inside the main sportsiq monorepo alongside every other sibling
+tool, so (fixed 2026-10-20) the predictions page is nested under its own
+docs/euroleague-iq/ subfolder like Blue Line, Blitz IQ, Match IQ etc. --
+it used to write straight to docs/index.html, which is the shared
+Predictor Suite landing page every tool links from, so each EuroLeague
+IQ run was silently overwriting that landing page (wiping out every
+other tool's nav card) until something else rewrote it back.
 
 Hot Form / Real Streak: team-level scoring-form screens, same concept as
 Euro Ice's Goal Streak panel but relative to a freshly-computed league
@@ -963,8 +966,8 @@ def write_player_props_csv(predictions, path):
 
 if __name__ == "__main__":
     predictions, streak_entries, real_streak_entries, lg_scored = build_predictions()
-    os.makedirs('docs', exist_ok=True)
-    with open('docs/index.html', 'w') as f:
+    os.makedirs('docs/euroleague-iq', exist_ok=True)
+    with open('docs/euroleague-iq/index.html', 'w') as f:
         f.write(make_html(predictions, streak_entries, real_streak_entries, lg_scored))
     write_csv(predictions, 'docs/euroleague_iq_predictions.csv')
     write_player_props_csv(predictions, 'docs/euroleague_iq_player_props.csv')
